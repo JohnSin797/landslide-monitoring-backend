@@ -91,114 +91,96 @@ app.get('/', (req, res) => {
 });
 
 // ESP32 → send sensor readings
+
 // app.post('/sensors', async (req, res) => {
 //   try {
-//     const { soilMoisture, vibration, deviceId = 'default', userUid } = req.body;
+//     let { soil_moisture, vibration, tilt = 0, device_id = "ESP32_001" } = req.body;
 
-//     if (soilMoisture === undefined || vibration === undefined) {
-//       return res.status(400).json({ error: 'Missing soilMoisture or vibration' });
+//     if (soil_moisture === undefined) {
+//       return res.status(400).json({ error: 'Missing soil_moisture' });
 //     }
 
-//     const timestamp = Date.now();
+//     // Optional: calculate alert level
+//     let alert_level = "normal";
+//     if (soil_moisture <= 20) alert_level = "warning";
+//     if (soil_moisture <= 10)  alert_level = "critical";
 
-//     const sensorData = {
-//       soilMoisture: Number(soilMoisture),
-//       vibration: Boolean(vibration),
-//       timestamp,
-//       receivedAt: admin.database.ServerValue.TIMESTAMP,
-//       deviceId,
-//       ...(userUid && { userUid })
+//     const reading = {
+//       device_id,
+//       soil_moisture: Number(soil_moisture),
+//       vibration: Number(vibration) ? 1 : 0,
+//       tilt: Number(tilt) ? 1 : 0,
+//       alert_level,
+//       timestamp: admin.database.ServerValue.TIMESTAMP
 //     };
 
-//     // Save to Realtime Database
-//     await db.ref(`devices/${deviceId}/sensors`).push(sensorData);
+//     // Save under per-device path
+//     const newRef = await db.ref(`sensors/${device_id}/readings`).push(reading);
 
-//     console.log(`Data saved for device ${deviceId}:`, sensorData);
+//     console.log(`Saved reading for ${device_id} at key ${newRef.key}`);
 
-//     // ─── Threshold check & SMS alert ────────────────────────────────
-//     let alertSent = false;
-
-//     if (Number(soilMoisture) <= SOIL_THRESHOLD) {
-//       let targetUid = userUid;
-
-//       // Fallback for single-user / testing
-//       if (!targetUid) {
-//         targetUid = 'YOUR_TEST_USER_UID_HERE'; // ← CHANGE THIS or implement device → user mapping
-//       }
-
-//       if (targetUid) {
-//         const phone = await getUserPhone(targetUid);
-
-//         if (phone) {
-//           const alertMessage = `Urgent: Soil moisture critically low (${soilMoisture}%) on device ${deviceId}! Please water now.`;
-
-//           try {
-//             await twilioClient.messages.create({
-//               body: alertMessage,
-//               from: TWILIO_PHONE_NUMBER,
-//               to: phone
-//             });
-
-//             console.log(`SMS alert sent to ${phone} (user ${targetUid})`);
-//             alertSent = true;
-//           } catch (smsError) {
-//             console.error('Failed to send SMS:', smsError.message);
-//           }
-//         }
-//       }
-//     }
+//     // SMS logic (optional - you can keep or remove)
+//     // ... your existing SMS code ...
 
 //     res.status(200).json({
 //       success: true,
-//       message: 'Data received and saved',
-//       alertSent
+//       key: newRef.key,
+//       reading
 //     });
 
 //   } catch (error) {
-//     console.error('Error in /sensors:', error);
-//     res.status(500).json({ error: 'Server error', details: error.message });
+//     console.error('Error:', error);
+//     res.status(500).json({ error: 'Server error' });
 //   }
 // });
 
 app.post('/sensors', async (req, res) => {
+  // In your index.js - inside app.post('/sensors', async (req, res) => {
   try {
-    let { soil_moisture, vibration, tilt = 0, device_id = "ESP32_001" } = req.body;
+    const { 
+      device_id = 'ESP32_001',
+      soil_moisture_1,
+      soil_moisture_2,
+      soil_moisture_3,
+      vibration 
+    } = req.body;
 
-    if (soil_moisture === undefined) {
-      return res.status(400).json({ error: 'Missing soil_moisture' });
+    // Required fields check (at least one soil moisture)
+    if (soil_moisture_1 === undefined && soil_moisture_2 === undefined && soil_moisture_3 === undefined) {
+      return res.status(400).json({ error: 'Missing all soil_moisture values' });
     }
 
-    // Optional: calculate alert level
-    let alert_level = "normal";
-    if (soil_moisture <= 20) alert_level = "warning";
-    if (soil_moisture <= 10)  alert_level = "critical";
+    const timestamp = admin.database.ServerValue.TIMESTAMP;
 
-    const reading = {
+    const sensorData = {
       device_id,
-      soil_moisture: Number(soil_moisture),
+      soil_moisture_1: soil_moisture_1 !== undefined ? Number(soil_moisture_1) : null,
+      soil_moisture_2: soil_moisture_2 !== undefined ? Number(soil_moisture_2) : null,
+      soil_moisture_3: soil_moisture_3 !== undefined ? Number(soil_moisture_3) : null,
       vibration: Number(vibration) ? 1 : 0,
-      tilt: Number(tilt) ? 1 : 0,
-      alert_level,
-      timestamp: admin.database.ServerValue.TIMESTAMP
+      timestamp
     };
 
-    // Save under per-device path
-    const newRef = await db.ref(`sensors/${device_id}/readings`).push(reading);
+    // Save – you can choose path style
+    // Option A: per device
+    await db.ref(`sensors/${device_id}`).push(sensorData);
 
-    console.log(`Saved reading for ${device_id} at key ${newRef.key}`);
+    // Option B: flat list
+    // await db.ref('sensors').push(sensorData);
 
-    // SMS logic (optional - you can keep or remove)
-    // ... your existing SMS code ...
+    console.log(`Data saved for ${device_id}:`, sensorData);
+
+    // Your existing SMS / alert logic...
+    // You can now use soil_moisture_1, _2, _3 for alert decisions
 
     res.status(200).json({
       success: true,
-      key: newRef.key,
-      reading
+      message: 'Data received and saved'
     });
 
   } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error in /sensors:', error);
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
 
