@@ -35,7 +35,7 @@ if (!serviceAccount.projectId || !serviceAccount.privateKey || !serviceAccount.c
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: `https://${process.env.FIREBASE_PROJECT_ID}.firebaseio.com`,  // Auto-built from project ID
+  databaseURL: "https://landslide-monitoring-sys-f8745-default-rtdb.asia-southeast1.firebasedatabase.app",  // Auto-built from project ID
   // or hard-code if needed: "https://landslide-monitoring-sys-f8745-default-rtdb.asia-southeast1.firebasedatabase.app"
 });
 
@@ -91,72 +91,114 @@ app.get('/', (req, res) => {
 });
 
 // ESP32 → send sensor readings
+// app.post('/sensors', async (req, res) => {
+//   try {
+//     const { soilMoisture, vibration, deviceId = 'default', userUid } = req.body;
+
+//     if (soilMoisture === undefined || vibration === undefined) {
+//       return res.status(400).json({ error: 'Missing soilMoisture or vibration' });
+//     }
+
+//     const timestamp = Date.now();
+
+//     const sensorData = {
+//       soilMoisture: Number(soilMoisture),
+//       vibration: Boolean(vibration),
+//       timestamp,
+//       receivedAt: admin.database.ServerValue.TIMESTAMP,
+//       deviceId,
+//       ...(userUid && { userUid })
+//     };
+
+//     // Save to Realtime Database
+//     await db.ref(`devices/${deviceId}/sensors`).push(sensorData);
+
+//     console.log(`Data saved for device ${deviceId}:`, sensorData);
+
+//     // ─── Threshold check & SMS alert ────────────────────────────────
+//     let alertSent = false;
+
+//     if (Number(soilMoisture) <= SOIL_THRESHOLD) {
+//       let targetUid = userUid;
+
+//       // Fallback for single-user / testing
+//       if (!targetUid) {
+//         targetUid = 'YOUR_TEST_USER_UID_HERE'; // ← CHANGE THIS or implement device → user mapping
+//       }
+
+//       if (targetUid) {
+//         const phone = await getUserPhone(targetUid);
+
+//         if (phone) {
+//           const alertMessage = `Urgent: Soil moisture critically low (${soilMoisture}%) on device ${deviceId}! Please water now.`;
+
+//           try {
+//             await twilioClient.messages.create({
+//               body: alertMessage,
+//               from: TWILIO_PHONE_NUMBER,
+//               to: phone
+//             });
+
+//             console.log(`SMS alert sent to ${phone} (user ${targetUid})`);
+//             alertSent = true;
+//           } catch (smsError) {
+//             console.error('Failed to send SMS:', smsError.message);
+//           }
+//         }
+//       }
+//     }
+
+//     res.status(200).json({
+//       success: true,
+//       message: 'Data received and saved',
+//       alertSent
+//     });
+
+//   } catch (error) {
+//     console.error('Error in /sensors:', error);
+//     res.status(500).json({ error: 'Server error', details: error.message });
+//   }
+// });
+
 app.post('/sensors', async (req, res) => {
   try {
-    const { soilMoisture, vibration, deviceId = 'default', userUid } = req.body;
+    let { soil_moisture, vibration, tilt = 0, device_id = "ESP32_001" } = req.body;
 
-    if (soilMoisture === undefined || vibration === undefined) {
-      return res.status(400).json({ error: 'Missing soilMoisture or vibration' });
+    if (soil_moisture === undefined) {
+      return res.status(400).json({ error: 'Missing soil_moisture' });
     }
 
-    const timestamp = Date.now();
+    // Optional: calculate alert level
+    let alert_level = "normal";
+    if (soil_moisture <= 20) alert_level = "warning";
+    if (soil_moisture <= 10)  alert_level = "critical";
 
-    const sensorData = {
-      soilMoisture: Number(soilMoisture),
-      vibration: Boolean(vibration),
-      timestamp,
-      receivedAt: admin.database.ServerValue.TIMESTAMP,
-      deviceId,
-      ...(userUid && { userUid })
+    const reading = {
+      device_id,
+      soil_moisture: Number(soil_moisture),
+      vibration: Number(vibration) ? 1 : 0,
+      tilt: Number(tilt) ? 1 : 0,
+      alert_level,
+      timestamp: admin.database.ServerValue.TIMESTAMP
     };
 
-    // Save to Realtime Database
-    await db.ref(`devices/${deviceId}/sensors`).push(sensorData);
+    // Save under per-device path
+    const newRef = await db.ref(`sensors/${device_id}/readings`).push(reading);
 
-    console.log(`Data saved for device ${deviceId}:`, sensorData);
+    console.log(`Saved reading for ${device_id} at key ${newRef.key}`);
 
-    // ─── Threshold check & SMS alert ────────────────────────────────
-    let alertSent = false;
-
-    if (Number(soilMoisture) <= SOIL_THRESHOLD) {
-      let targetUid = userUid;
-
-      // Fallback for single-user / testing
-      if (!targetUid) {
-        targetUid = 'YOUR_TEST_USER_UID_HERE'; // ← CHANGE THIS or implement device → user mapping
-      }
-
-      if (targetUid) {
-        const phone = await getUserPhone(targetUid);
-
-        if (phone) {
-          const alertMessage = `Urgent: Soil moisture critically low (${soilMoisture}%) on device ${deviceId}! Please water now.`;
-
-          try {
-            await twilioClient.messages.create({
-              body: alertMessage,
-              from: TWILIO_PHONE_NUMBER,
-              to: phone
-            });
-
-            console.log(`SMS alert sent to ${phone} (user ${targetUid})`);
-            alertSent = true;
-          } catch (smsError) {
-            console.error('Failed to send SMS:', smsError.message);
-          }
-        }
-      }
-    }
+    // SMS logic (optional - you can keep or remove)
+    // ... your existing SMS code ...
 
     res.status(200).json({
       success: true,
-      message: 'Data received and saved',
-      alertSent
+      key: newRef.key,
+      reading
     });
 
   } catch (error) {
-    console.error('Error in /sensors:', error);
-    res.status(500).json({ error: 'Server error', details: error.message });
+    console.error('Error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
