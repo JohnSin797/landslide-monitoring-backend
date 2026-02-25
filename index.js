@@ -92,94 +92,163 @@ app.get('/', (req, res) => {
 
 // ESP32 → send sensor readings
 
-// app.post('/sensors', async (req, res) => {
-//   try {
-//     let { soil_moisture, vibration, tilt = 0, device_id = "ESP32_001" } = req.body;
-
-//     if (soil_moisture === undefined) {
-//       return res.status(400).json({ error: 'Missing soil_moisture' });
-//     }
-
-//     // Optional: calculate alert level
-//     let alert_level = "normal";
-//     if (soil_moisture <= 20) alert_level = "warning";
-//     if (soil_moisture <= 10)  alert_level = "critical";
-
-//     const reading = {
-//       device_id,
-//       soil_moisture: Number(soil_moisture),
-//       vibration: Number(vibration) ? 1 : 0,
-//       tilt: Number(tilt) ? 1 : 0,
-//       alert_level,
-//       timestamp: admin.database.ServerValue.TIMESTAMP
-//     };
-
-//     // Save under per-device path
-//     const newRef = await db.ref(`sensors/${device_id}/readings`).push(reading);
-
-//     console.log(`Saved reading for ${device_id} at key ${newRef.key}`);
-
-//     // SMS logic (optional - you can keep or remove)
-//     // ... your existing SMS code ...
-
-//     res.status(200).json({
-//       success: true,
-//       key: newRef.key,
-//       reading
-//     });
-
-//   } catch (error) {
-//     console.error('Error:', error);
-//     res.status(500).json({ error: 'Server error' });
-//   }
-// });
+// ────────────────────────────────────────────────
+//  /sensors POST route – full version
+// ────────────────────────────────────────────────
 
 app.post('/sensors', async (req, res) => {
-  // In your index.js - inside app.post('/sensors', async (req, res) => {
   try {
-    const { 
+    const {
       device_id = 'ESP32_001',
       soil_moisture_1,
       soil_moisture_2,
       soil_moisture_3,
-      vibration 
+      tilt = 0,           // degrees
+      vibration = 0       // in g
     } = req.body;
 
-    // Required fields check (at least one soil moisture)
-    if (soil_moisture_1 === undefined && soil_moisture_2 === undefined && soil_moisture_3 === undefined) {
+    // Basic validation – at least one soil moisture value
+    if (
+      soil_moisture_1 === undefined &&
+      soil_moisture_2 === undefined &&
+      soil_moisture_3 === undefined
+    ) {
       return res.status(400).json({ error: 'Missing all soil_moisture values' });
     }
 
-    const timestamp = admin.database.ServerValue.TIMESTAMP;
+    // Convert to numbers
+    const sm1 = Number(soil_moisture_1) || 0;
+    const sm2 = Number(soil_moisture_2) || 0;
+    const sm3 = Number(soil_moisture_3) || 0;
+    const tiltDeg = Number(tilt);
+    const vibG = Number(vibration);
 
-    const sensorData = {
+    // ─── Alert Level Calculation ────────────────────────────────────────
+
+    let alertLevel = 1;
+    let alertMessage = "Normal but Monitored";
+
+    // Count conditions that indicate increased risk
+    let riskCount = 0;
+
+    // Soil moisture risk
+    if (sm1 > 60) riskCount++;
+    if (sm2 > 65) riskCount++;
+    if (sm3 > 65) riskCount++;
+
+    // Tilt risk
+    if (tiltDeg > 2) riskCount++;
+
+    // Vibration risk
+    if (vibG > 0.03) riskCount++;
+
+    // Level 2 – Intermediate Warning
+    // At least 3 risk indicators
+    if (riskCount >= 3) {
+      alertLevel = 2;
+      alertMessage = "Intermediate Warning";
+    }
+
+    // Level 3 – Critical / Imminent Failure
+    // Any of these serious conditions
+    if (
+      (sm1 > 75 && sm2 > 80 && sm3 > 85) ||     // all soil very high
+      (tiltDeg > 5 && vibG > 0.08) ||           // tilt + vibration critical
+      (sm1 > 75 && tiltDeg > 5) ||              // soil + tilt critical
+      vibG > 0.20                               // extreme vibration
+    ) {
+      alertLevel = 3;
+      alertMessage = "Critical - Imminent Failure";
+    }
+
+    // Prepare data to save
+    const reading = {
       device_id,
-      soil_moisture_1: soil_moisture_1 !== undefined ? Number(soil_moisture_1) : null,
-      soil_moisture_2: soil_moisture_2 !== undefined ? Number(soil_moisture_2) : null,
-      soil_moisture_3: soil_moisture_3 !== undefined ? Number(soil_moisture_3) : null,
-      vibration: Number(vibration) ? 1 : 0,
-      timestamp
+      soil_moisture_1: sm1,
+      soil_moisture_2: sm2,
+      soil_moisture_3: sm3,
+      tilt: tiltDeg,
+      vibration: vibG,
+      alert_level: alertLevel,
+      alert_message: alertMessage,
+      timestamp: admin.database.ServerValue.TIMESTAMP
     };
 
-    // Save – you can choose path style
-    // Option A: per device
-    await db.ref(`sensors/${device_id}`).push(sensorData);
+    // Save to Realtime Database
+    const newRef = await db.ref(`sensors/${device_id}/readings`).push(reading);
+    console.log(`Saved reading for ${device_id} at key ${newRef.key} - Level ${alertLevel}`);
 
-    // Option B: flat list
-    // await db.ref('sensors').push(sensorData);
+    // ─── Send SMS to all subscribed users ──────────────────────────────
+    let smsCount = 0;
 
-    console.log(`Data saved for ${device_id}:`, sensorData);
+    if (alertLevel >= 2) {
+      // Check cooldown (optional – prevents spam)
+      const deviceRef = admin.firestore().collection('devices').doc(device_id);
+      const deviceSnap = await deviceRef.get();
+      const lastAlert = deviceSnap.data()?.lastAlertSent?.toMillis() || 0;
 
-    // Your existing SMS / alert logic...
-    // You can now use soil_moisture_1, _2, _3 for alert decisions
+      const cooldownMinutes = 15;
+      if (Date.now() - lastAlert < cooldownMinutes * 60 * 1000) {
+        console.log(`Alert skipped – last sent < ${cooldownMinutes} min ago`);
+      } else {
+        // Get all subscribers
+        const subsSnap = await admin.firestore()
+          .collection('devices')
+          .doc(device_id)
+          .collection('alert_subscribers')
+          .get();
 
+        if (!subsSnap.empty) {
+          const smsPromises = [];
+
+          subsSnap.forEach((doc) => {
+            const sub = doc.data();
+            const phone = sub.phoneNumber;
+
+            if (phone && phone.startsWith('+')) {
+              const msg = `${alertMessage} (Level ${alertLevel}) – Device: ${device_id}\n` +
+                          `Soil: ${sm1}% / ${sm2}% / ${sm3}%\n` +
+                          `Tilt: ${tiltDeg}° | Vibration: ${vibG}g`;
+
+              smsPromises.push(
+                twilioClient.messages.create({
+                  body: msg,
+                  from: TWILIO_PHONE_NUMBER,
+                  to: phone
+                })
+                .then(() => {
+                  smsCount++;
+                  console.log(`SMS sent to ${phone}`);
+                })
+                .catch(err => {
+                  console.error(`SMS failed to ${phone}:`, err.message);
+                })
+              );
+            }
+          });
+
+          await Promise.all(smsPromises);
+
+          // Update last alert time
+          await deviceRef.set({
+            lastAlertSent: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+        } else {
+          console.log(`No subscribers found for ${device_id}`);
+        }
+      }
+    }
+
+    // Send response back to ESP32
     res.status(200).json({
       success: true,
-      message: 'Data received and saved'
+      alert_level: alertLevel,
+      alert_message: alertMessage,
+      sms_sent_count: smsCount
     });
 
   } catch (error) {
-    console.error('Error in /sensors:', error);
+    console.error('Error processing /sensors:', error);
     res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
